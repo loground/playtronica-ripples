@@ -285,7 +285,7 @@ triggerModeSelect.addEventListener('change', () => {
   triggerMode = triggerModeSelect.value
   intensityInput.disabled = triggerMode === 'manual'
   noteLabel.textContent = triggerMode === 'manual'
-    ? 'Manual: tap once, drag to sustain'
+    ? 'Manual: auto interaction with rain disabled'
     : 'Auto rain mode active'
 })
 
@@ -665,17 +665,7 @@ renderer.domElement.addEventListener('pointerdown', async (event) => {
   await audioContext.resume()
   audioToggle.textContent = 'Audio Active'
   const uv = getPointerUV(event)
-  if (triggerMode === 'manual') {
-    spawnRipple(uv, 1.0, 'pointer')
-    activeManualRipple = ripples[ripples.length - 1] || null
-    manualPointerUV = uv
-    manualPressStart = performance.now()
-    manualMoved = false
-    startManualSustain(uv)
-    setManualSustainLevel(0.0001)
-  } else {
-    spawnRipple(uv, 0.95, 'pointer')
-  }
+  spawnRipple(uv, 0.95, 'pointer')
   lastPointerUV = uv
   lastPointerStamp = performance.now()
 })
@@ -687,28 +677,7 @@ renderer.domElement.addEventListener('pointermove', (event) => {
   const uv = getPointerUV(event)
   const now = performance.now()
   if (!lastPointerUV) {
-    if (triggerMode === 'auto') {
-      spawnRipple(uv, 0.9, 'pointer')
-    }
-    lastPointerUV = uv
-    lastPointerStamp = now
-    return
-  }
-  if (triggerMode === 'manual') {
-    if (!activeManualRipple) {
-      lastPointerUV = uv
-      lastPointerStamp = now
-      return
-    }
-    const moveDist = Math.hypot(uv.x - lastPointerUV.x, uv.y - lastPointerUV.y)
-    manualMoved = manualMoved || moveDist > 0.0015
-    manualPointerUV = uv
-    activeManualRipple.x = uv.x
-    activeManualRipple.y = uv.y
-    activeManualRipple.start = uniforms.uTime.value
-    activeManualRipple.amp = 0.95
-    startManualSustain(uv)
-    setManualSustainLevel(0.13)
+    spawnRipple(uv, 0.9, 'pointer')
     lastPointerUV = uv
     lastPointerStamp = now
     return
@@ -726,17 +695,6 @@ const endPointer = (event) => {
     activePointers.delete(event.pointerId)
   } else {
     activePointers.clear()
-  }
-
-  if (triggerMode === 'manual' && activePointers.size === 0) {
-    const heldFor = performance.now() - manualPressStart
-    if (manualMoved || heldFor > 220) {
-      stopManualSustain(0.45)
-    } else {
-      stopManualSustain(0.12)
-    }
-    activeManualRipple = null
-    manualPointerUV = null
   }
   pointerDown = activePointers.size > 0
   if (!pointerDown) {
@@ -792,12 +750,6 @@ function animate() {
   requestAnimationFrame(animate)
   const dt = Math.min(clock.getDelta(), 0.05)
   uniforms.uTime.value = clock.elapsedTime
-  if (triggerMode === 'manual' && pointerDown && activeManualRipple && manualPointerUV) {
-    activeManualRipple.x = manualPointerUV.x
-    activeManualRipple.y = manualPointerUV.y
-    activeManualRipple.start = uniforms.uTime.value
-    activeManualRipple.amp = 0.95
-  }
   spawnAutoDrops(dt)
   updateRipples(uniforms.uTime.value)
   renderer.render(scene, camera)
