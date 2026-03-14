@@ -5,6 +5,13 @@ const GRID_COLS = 12
 const GRID_ROWS = 6
 const MAX_RIPPLES = 96
 const RIPPLE_LIFETIME = 5.2
+const HARMONY_SHIFT_SECONDS = 18
+const AMBIENT_MODES = [
+  { root: 40, scale: [0, 2, 4, 7, 9] },
+  { root: 45, scale: [0, 2, 5, 7, 9] },
+  { root: 43, scale: [0, 3, 5, 7, 10] },
+  { root: 47, scale: [0, 2, 4, 6, 9] },
+]
 
 const app = document.querySelector('#app')
 app.innerHTML = `
@@ -18,10 +25,12 @@ app.innerHTML = `
     <div class="row">
       <label for="instrument">Instrument</label>
       <select id="instrument">
-        <option value="piano">Piano</option>
-        <option value="bell">Bell</option>
+        <option value="dx7">DX7 FM</option>
+        <option value="piano">Soft Piano</option>
+        <option value="pad">Web Pad</option>
+        <option value="bell">Glass Bell</option>
         <option value="organ">Organ</option>
-        <option value="synth">Synth</option>
+        <option value="synth">Analog Synth</option>
       </select>
       <span id="note-label">Tap water to start</span>
     </div>
@@ -195,6 +204,9 @@ intensityInput.addEventListener('input', () => {
 
 let audioContext
 let masterGain
+let dryGain
+let wetGain
+let ambienceConvolver
 
 function ensureAudio() {
   if (audioContext) {
@@ -202,7 +214,18 @@ function ensureAudio() {
   }
   audioContext = new AudioContext()
   masterGain = audioContext.createGain()
-  masterGain.gain.value = 0.34
+  dryGain = audioContext.createGain()
+  wetGain = audioContext.createGain()
+  ambienceConvolver = audioContext.createConvolver()
+
+  masterGain.gain.value = 0.3
+  dryGain.gain.value = 0.86
+  wetGain.gain.value = 0.32
+  ambienceConvolver.buffer = createImpulseResponse(audioContext, 2.8, 2.2)
+
+  dryGain.connect(masterGain)
+  wetGain.connect(ambienceConvolver)
+  ambienceConvolver.connect(masterGain)
   masterGain.connect(audioContext.destination)
 }
 
@@ -216,13 +239,84 @@ function midiToFrequency(midi) {
   return 440 * (2 ** ((midi - 69) / 12))
 }
 
-function uvToNote(uv) {
+function createImpulseResponse(context, duration, decay) {
+  const rate = context.sampleRate
+  const length = Math.floor(rate * duration)
+  const buffer = context.createBuffer(2, length, rate)
+  for (let c = 0; c < 2; c += 1) {
+    const data = buffer.getChannelData(c)
+    for (let i = 0; i < length; i += 1) {
+      const t = i / length
+      data[i] = (Math.random() * 2 - 1) * ((1 - t) ** decay)
+    }
+  }
+  return buffer
+}
+
+function midiToName(midi) {
+  return `${notes[midi % 12]}${Math.floor(midi / 12) - 1}`
+}
+
+function uvToNote(uv, velocity, source) {
   const col = Math.min(GRID_COLS - 1, Math.max(0, Math.floor(uv.x * GRID_COLS)))
   const row = Math.min(GRID_ROWS - 1, Math.max(0, Math.floor(uv.y * GRID_ROWS)))
-  const octave = GRID_ROWS - 1 - row
-  const midi = 36 + octave * 12 + col
-  const noteName = `${notes[midi % 12]}${Math.floor(midi / 12) - 1}`
+
+  const modeIndex = Math.floor(uniforms.uTime.value / HARMONY_SHIFT_SECONDS) % AMBIENT_MODES.length
+  const mode = AMBIENT_MODES[modeIndex]
+  const degree = mode.scale[col % mode.scale.length]
+  const octave = source === 'pointer' ? 2 + Math.floor((1 - uv.y) * 3.5) : 1 + Math.floor((1 - uv.y) * 3.0)
+  let midi = mode.root + degree + octave * 12
+
+  const shimmer = 0.08 + velocity * 0.18
+  if (Math.random() < shimmer) midi += 12
+  if (Math.random() < 0.06) midi -= 12
+  midi = Math.max(30, Math.min(92, midi))
+  const noteName = midiToName(midi)
   return { midi, noteName, col, row }
+}
+
+function routeVoice(node) {
+  node.connect(dryGain)
+  node.connect(wetGain)
+}
+
+function playDX7ish(frequency, velocity, now) {
+  const carrier = audioContext.createOscillator()
+  const mod1 = audioContext.createOscillator()
+  const mod2 = audioContext.createOscillator()
+  const modGain1 = audioContext.createGain()
+  const modGain2 = audioContext.createGain()
+  const amp = audioContext.createGain()
+
+  carrier.type = 'sine'
+  mod1.type = 'sine'
+  mod2.type = 'sine'
+  carrier.frequency.setValueAtTime(frequency, now)
+  mod1.frequency.setValueAtTime(frequency * 2.0, now)
+  mod2.frequency.setValueAtTime(frequency * 3.01, now)
+
+  modGain1.gain.setValueAtTime(frequency * 1.8, now)
+  modGain1.gain.exponentialRampToValueAtTime(Math.max(12, frequency * 0.2), now + 1.4)
+  modGain2.gain.setValueAtTime(frequency * 0.9, now)
+  modGain2.gain.exponentialRampToValueAtTime(Math.max(8, frequency * 0.08), now + 1.2)
+
+  amp.gain.setValueAtTime(0.0001, now)
+  amp.gain.exponentialRampToValueAtTime(0.22 * velocity, now + 0.012)
+  amp.gain.exponentialRampToValueAtTime(0.0001, now + 1.9)
+
+  mod1.connect(modGain1)
+  mod2.connect(modGain2)
+  modGain1.connect(carrier.frequency)
+  modGain2.connect(carrier.frequency)
+  carrier.connect(amp)
+  routeVoice(amp)
+
+  carrier.start(now)
+  mod1.start(now)
+  mod2.start(now)
+  carrier.stop(now + 2.0)
+  mod1.stop(now + 2.0)
+  mod2.stop(now + 2.0)
 }
 
 function playNote(midi, velocity, instrument) {
@@ -231,6 +325,53 @@ function playNote(midi, velocity, instrument) {
   }
   const frequency = midiToFrequency(midi)
   const now = audioContext.currentTime
+
+  if (instrument === 'dx7') {
+    playDX7ish(frequency, velocity, now)
+    return
+  }
+
+  if (instrument === 'pad') {
+    const oscA = audioContext.createOscillator()
+    const oscB = audioContext.createOscillator()
+    const lfo = audioContext.createOscillator()
+    const lfoGain = audioContext.createGain()
+    const filter = audioContext.createBiquadFilter()
+    const out = audioContext.createGain()
+
+    oscA.type = 'triangle'
+    oscB.type = 'sine'
+    oscA.frequency.setValueAtTime(frequency, now)
+    oscB.frequency.setValueAtTime(frequency * 0.5, now)
+    oscB.detune.setValueAtTime(6, now)
+
+    lfo.type = 'sine'
+    lfo.frequency.setValueAtTime(0.25, now)
+    lfoGain.gain.setValueAtTime(10, now)
+    lfo.connect(lfoGain)
+    lfoGain.connect(oscA.detune)
+
+    filter.type = 'lowpass'
+    filter.frequency.setValueAtTime(1200, now)
+    filter.Q.setValueAtTime(1.4, now)
+
+    out.gain.setValueAtTime(0.0001, now)
+    out.gain.exponentialRampToValueAtTime(0.2 * velocity, now + 0.25)
+    out.gain.exponentialRampToValueAtTime(0.0001, now + 3.8)
+
+    oscA.connect(out)
+    oscB.connect(out)
+    out.connect(filter)
+    routeVoice(filter)
+
+    oscA.start(now)
+    oscB.start(now)
+    lfo.start(now)
+    oscA.stop(now + 4.0)
+    oscB.stop(now + 4.0)
+    lfo.stop(now + 4.0)
+    return
+  }
 
   if (instrument === 'bell') {
     const carrier = audioContext.createOscillator()
@@ -251,7 +392,7 @@ function playNote(midi, velocity, instrument) {
     mod.connect(modGain)
     modGain.connect(carrier.frequency)
     carrier.connect(out)
-    out.connect(masterGain)
+    routeVoice(out)
     carrier.start(now)
     mod.start(now)
     carrier.stop(now + 1.7)
@@ -297,7 +438,7 @@ function playNote(midi, velocity, instrument) {
   oscA.connect(voice)
   oscB.connect(voice)
   voice.connect(filter)
-  filter.connect(masterGain)
+  routeVoice(filter)
 
   oscA.start(now)
   oscB.start(now)
@@ -305,12 +446,15 @@ function playNote(midi, velocity, instrument) {
   oscB.stop(now + decay + 0.06)
 }
 
-function tryTriggerNote(uv, velocity) {
-  const { midi, noteName, col, row } = uvToNote(uv)
+function tryTriggerNote(uv, velocity, source) {
+  const { midi, noteName, col, row } = uvToNote(uv, velocity, source)
   const key = `${col}-${row}`
   const now = performance.now()
   const previous = recentlyTriggered.get(key) || 0
   if (now - previous < 95) {
+    return
+  }
+  if (source === 'auto' && Math.random() > (0.62 + dropIntensity * 0.28)) {
     return
   }
   recentlyTriggered.set(key, now)
@@ -318,7 +462,7 @@ function tryTriggerNote(uv, velocity) {
   playNote(midi, velocity, instrumentSelect.value)
 }
 
-function spawnRipple(uv, strength) {
+function spawnRipple(uv, strength, source = 'auto') {
   const elapsed = uniforms.uTime.value
   ripples.push({
     x: uv.x,
@@ -329,7 +473,7 @@ function spawnRipple(uv, strength) {
   if (ripples.length > MAX_RIPPLES) {
     ripples.shift()
   }
-  tryTriggerNote(uv, Math.max(0.25, strength))
+  tryTriggerNote(uv, Math.max(0.25, strength), source)
 }
 
 let pointerDown = false
@@ -352,7 +496,7 @@ renderer.domElement.addEventListener('pointerdown', async (event) => {
   await audioContext.resume()
   audioToggle.textContent = 'Audio Active'
   const uv = getPointerUV(event)
-  spawnRipple(uv, 0.95)
+  spawnRipple(uv, 0.95, 'pointer')
   lastPointerUV = uv
   lastPointerStamp = performance.now()
 })
@@ -364,14 +508,14 @@ renderer.domElement.addEventListener('pointermove', (event) => {
   const uv = getPointerUV(event)
   const now = performance.now()
   if (!lastPointerUV) {
-    spawnRipple(uv, 0.9)
+    spawnRipple(uv, 0.9, 'pointer')
     lastPointerUV = uv
     lastPointerStamp = now
     return
   }
   const dist = Math.hypot(uv.x - lastPointerUV.x, uv.y - lastPointerUV.y)
   if (dist > 0.02 || now - lastPointerStamp > 80) {
-    spawnRipple(uv, 0.82)
+    spawnRipple(uv, 0.82, 'pointer')
     lastPointerUV = uv
     lastPointerStamp = now
   }
