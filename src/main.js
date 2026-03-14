@@ -3,17 +3,14 @@ import * as THREE from 'three'
 
 const GRID_COLS = 12
 const GRID_ROWS = 6
-const MAX_RIPPLES = 96
-const RIPPLE_LIFETIME = 5.2
-const CIRCLE_OF_FIFTHS = [0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5]
-const HARMONY_MOVES = [1, 1, -2, 1, 2, -1]
-const CHORD_TYPES = [
-  { name: 'maj9', intervals: [0, 4, 7, 11, 14] },
-  { name: '6/9', intervals: [0, 4, 7, 9, 14] },
-  { name: 'maj7#11', intervals: [0, 4, 7, 11, 18] },
-  { name: 'm9', intervals: [0, 3, 7, 10, 14] },
-  { name: 'm11', intervals: [0, 3, 7, 10, 17] },
-  { name: '13sus', intervals: [0, 5, 7, 10, 21] },
+const MAX_RIPPLES = 72
+const RIPPLE_LIFETIME = 4.2
+const HARMONY_SHIFT_SECONDS = 18
+const AMBIENT_MODES = [
+  { root: 40, scale: [0, 2, 4, 7, 9] },
+  { root: 45, scale: [0, 2, 5, 7, 9] },
+  { root: 43, scale: [0, 3, 5, 7, 10] },
+  { root: 47, scale: [0, 2, 4, 6, 9] },
 ]
 
 const app = document.querySelector('#app')
@@ -67,7 +64,7 @@ const uniforms = {
   uRippleRadius: { value: 1.0 },
   uRippleAmp: { value: 1.0 },
   uNormalStrength: { value: 28.0 },
-  uRippleFreq: { value: 104.0 },
+  uRippleFreq: { value: 92.0 },
   uRippleCount: { value: 0 },
   uRipples: { value: rippleUniform },
 }
@@ -114,12 +111,15 @@ const material = new THREE.ShaderMaterial({
         }
 
         float d = distance(uv, ripple.xy) / max(0.2, uRippleRadius);
-        float phase = d * uRippleFreq - dt * 8.0;
-        float envelope = exp(-dt * 1.32) * exp(-d * 5.6);
+        if (d > 1.35) {
+          continue;
+        }
+        float phase = d * uRippleFreq - dt * 6.5;
+        float envelope = exp(-dt * 1.52) * exp(-d * 7.2);
         h += sin(phase) * envelope * ripple.w * uRippleAmp;
       }
 
-      float n = sin((uv.x + uTime * 0.03) * 30.0) * cos((uv.y - uTime * 0.02) * 24.0) * 0.008;
+      float n = sin((uv.x + uTime * 0.03) * 14.0) * cos((uv.y - uTime * 0.02) * 10.0) * 0.004;
       return h + n;
     }
 
@@ -129,8 +129,8 @@ const material = new THREE.ShaderMaterial({
 
       vec2 px = vec2(1.0 / max(1.0, uResolution.x), 0.0);
       vec2 py = vec2(0.0, 1.0 / max(1.0, uResolution.y));
-      float dx = rippleHeight(clamp(uv + px, 0.0, 1.0)) - rippleHeight(clamp(uv - px, 0.0, 1.0));
-      float dy = rippleHeight(clamp(uv + py, 0.0, 1.0)) - rippleHeight(clamp(uv - py, 0.0, 1.0));
+      float dx = rippleHeight(clamp(uv + px, 0.0, 1.0)) - h;
+      float dy = rippleHeight(clamp(uv + py, 0.0, 1.0)) - h;
       vec3 normal = normalize(vec3(-dx * uNormalStrength, -dy * uNormalStrength, 1.0));
 
       vec3 lightDir = normalize(vec3(-0.3, 0.5, 0.82));
@@ -190,10 +190,10 @@ function applyResponsiveTuning() {
   const narrow = window.matchMedia('(max-width: 820px)').matches
   isMobileLayout = coarse || narrow
 
-  uniforms.uRippleRadius.value = isMobileLayout ? 1.12 : 1.0
-  uniforms.uRippleAmp.value = isMobileLayout ? 0.88 : 1.0
-  uniforms.uNormalStrength.value = isMobileLayout ? 25.0 : 28.0
-  uniforms.uRippleFreq.value = isMobileLayout ? 132.0 : 104.0
+  uniforms.uRippleRadius.value = isMobileLayout ? 1.65 : 1.0
+  uniforms.uRippleAmp.value = isMobileLayout ? 0.78 : 0.96
+  uniforms.uNormalStrength.value = isMobileLayout ? 20.0 : 26.0
+  uniforms.uRippleFreq.value = isMobileLayout ? 62.0 : 84.0
 }
 
 const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -228,15 +228,6 @@ let manualMoved = false
 let manualSustain = null
 let manualPointerUV = null
 const activePointers = new Set()
-let harmonyCircleIndex = 0
-let harmonyStep = 0
-let autoAdvanceCounter = 0
-let lastLeadMidi = 57
-let currentHarmony = {
-  rootPc: CIRCLE_OF_FIFTHS[0],
-  name: 'maj9',
-  tones: [48, 52, 55, 59, 62],
-}
 
 let audioContext
 let masterGain
@@ -311,58 +302,21 @@ function midiToName(midi) {
   return `${notes[midi % 12]}${Math.floor(midi / 12) - 1}`
 }
 
-function closestPitchClassMidi(pc, target) {
-  let best = target
-  let bestDist = Infinity
-  for (let octave = 2; octave <= 7; octave += 1) {
-    const cand = octave * 12 + pc
-    const d = Math.abs(cand - target)
-    if (d < bestDist) {
-      bestDist = d
-      best = cand
-    }
-  }
-  return best
-}
-
-function rebuildHarmony(rootPc, chordType) {
-  const tones = chordType.intervals.map((interval) => {
-    let tone = 48 + rootPc + interval
-    while (tone < 38) tone += 12
-    while (tone > 88) tone -= 12
-    return tone
-  })
-  currentHarmony = {
-    rootPc,
-    name: chordType.name,
-    tones,
-  }
-}
-
-function advanceHarmony(seedUv, isMultiTouch) {
-  let move = HARMONY_MOVES[harmonyStep % HARMONY_MOVES.length]
-  if (isMultiTouch) {
-    move += seedUv.x > 0.5 ? 1 : -1
-  }
-  if (seedUv.y < 0.25) {
-    move += 1
-  }
-  harmonyCircleIndex = (harmonyCircleIndex + move + 120) % 12
-  harmonyStep += 1
-  const rootPc = CIRCLE_OF_FIFTHS[harmonyCircleIndex]
-  const typeIndex = (harmonyStep + (isMultiTouch ? 2 : 0)) % CHORD_TYPES.length
-  rebuildHarmony(rootPc, CHORD_TYPES[typeIndex])
-}
-
-function uvToNote(uv) {
+function uvToNote(uv, velocity, source) {
   const col = Math.min(GRID_COLS - 1, Math.max(0, Math.floor(uv.x * GRID_COLS)))
   const row = Math.min(GRID_ROWS - 1, Math.max(0, Math.floor(uv.y * GRID_ROWS)))
-  const toneIndex = col % currentHarmony.tones.length
-  const target = 40 + (1 - uv.y) * 34
-  const pitchClass = currentHarmony.tones[toneIndex] % 12
-  const midi = closestPitchClassMidi(pitchClass, target)
+  const modeIndex = Math.floor(uniforms.uTime.value / HARMONY_SHIFT_SECONDS) % AMBIENT_MODES.length
+  const mode = AMBIENT_MODES[modeIndex]
+  const degree = mode.scale[col % mode.scale.length]
+  const octave = source === 'pointer' ? 2 + Math.floor((1 - uv.y) * 3.5) : 1 + Math.floor((1 - uv.y) * 3.0)
+  let midi = mode.root + degree + octave * 12
+
+  const shimmer = 0.08 + velocity * 0.18
+  if (Math.random() < shimmer) midi += 12
+  if (Math.random() < 0.06) midi -= 12
+  midi = Math.max(30, Math.min(92, midi))
   const noteName = midiToName(midi)
-  return { midi, noteName, col, row, chordName: currentHarmony.name, chordTones: currentHarmony.tones }
+  return { midi, noteName, col, row }
 }
 
 function routeVoice(node) {
@@ -374,7 +328,7 @@ function startManualSustain(uv) {
   if (!audioContext || audioContext.state !== 'running') {
     return
   }
-  const note = uvToNote(uv)
+  const note = uvToNote(uv, 0.8, 'pointer')
   const frequency = midiToFrequency(note.midi)
   if (!manualSustain) {
     const oscA = audioContext.createOscillator()
@@ -592,20 +546,7 @@ function playNote(midi, velocity, instrument) {
 }
 
 function tryTriggerNote(uv, velocity, source) {
-  const isMultiTouch = source === 'pointer' && activePointers.size > 1
-  const shouldAdvance =
-    source === 'pointer' ||
-    source === 'swipe' ||
-    source === 'funnel' ||
-    source === 'spin' ||
-    source === 'loop' ||
-    (source === 'auto' && autoAdvanceCounter++ % 4 === 0)
-
-  if (shouldAdvance) {
-    advanceHarmony(uv, isMultiTouch)
-  }
-
-  const { midi, noteName, col, row, chordName, chordTones } = uvToNote(uv)
+  const { midi, noteName, col, row } = uvToNote(uv, velocity, source)
   const key = `${col}-${row}`
   const now = performance.now()
   const previous = recentlyTriggered.get(key) || 0
@@ -616,22 +557,8 @@ function tryTriggerNote(uv, velocity, source) {
     return
   }
   recentlyTriggered.set(key, now)
-  noteLabel.textContent = `Now playing: ${noteName} (${chordName})`
+  noteLabel.textContent = `Now playing: ${noteName}`
   playNote(midi, velocity, instrumentSelect.value)
-  lastLeadMidi = midi
-
-  if (isMultiTouch) {
-    const voicing = [0, 2, 3, 4].map((idx, voiceIdx) => {
-      const tone = chordTones[idx % chordTones.length]
-      const anchor = lastLeadMidi + (voiceIdx - 1) * 6
-      return closestPitchClassMidi(tone % 12, anchor)
-    })
-    voicing.forEach((tone, voiceIdx) => {
-      setTimeout(() => {
-        playNote(tone, velocity * (0.65 - voiceIdx * 0.08), instrumentSelect.value)
-      }, voiceIdx * 42)
-    })
-  }
 }
 
 function spawnRipple(uv, strength, source = 'auto') {
