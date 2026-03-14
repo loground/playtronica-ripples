@@ -18,6 +18,12 @@ app.innerHTML = `
   <div id="hud">
     <div class="row">
       <button id="audio-toggle" type="button">Enable Audio</button>
+      <button id="mute-toggle" type="button">Mute</button>
+      <label for="trigger-mode">Mode</label>
+      <select id="trigger-mode">
+        <option value="auto" selected>Auto</option>
+        <option value="manual">Manual</option>
+      </select>
       <label for="intensity">Drop intensity</label>
       <input id="intensity" type="range" min="0" max="100" value="35" />
       <output id="intensity-value">35%</output>
@@ -196,11 +202,25 @@ const intensityValue = document.querySelector('#intensity-value')
 const instrumentSelect = document.querySelector('#instrument')
 const noteLabel = document.querySelector('#note-label')
 const audioToggle = document.querySelector('#audio-toggle')
+const muteToggle = document.querySelector('#mute-toggle')
+const triggerModeSelect = document.querySelector('#trigger-mode')
 
 intensityInput.addEventListener('input', () => {
   dropIntensity = Number(intensityInput.value) / 100
   intensityValue.textContent = `${intensityInput.value}%`
 })
+
+let triggerMode = 'auto'
+let audioMuted = false
+let baseMasterGain = 0.3
+let pointerDown = false
+let lastPointerUV = null
+let lastPointerStamp = 0
+let activeManualRipple = null
+let manualPressStart = 0
+let manualMoved = false
+let manualSustain = null
+let manualPointerUV = null
 
 let audioContext
 let masterGain
@@ -218,7 +238,7 @@ function ensureAudio() {
   wetGain = audioContext.createGain()
   ambienceConvolver = audioContext.createConvolver()
 
-  masterGain.gain.value = 0.3
+  masterGain.gain.value = baseMasterGain
   dryGain.gain.value = 0.86
   wetGain.gain.value = 0.32
   ambienceConvolver.buffer = createImpulseResponse(audioContext, 2.8, 2.2)
@@ -233,6 +253,24 @@ audioToggle.addEventListener('click', async () => {
   ensureAudio()
   await audioContext.resume()
   audioToggle.textContent = 'Audio Active'
+})
+
+muteToggle.addEventListener('click', () => {
+  audioMuted = !audioMuted
+  muteToggle.textContent = audioMuted ? 'Unmute' : 'Mute'
+  if (masterGain) {
+    const now = audioContext.currentTime
+    masterGain.gain.cancelScheduledValues(now)
+    masterGain.gain.setTargetAtTime(audioMuted ? 0.0001 : baseMasterGain, now, 0.015)
+  }
+})
+
+triggerModeSelect.addEventListener('change', () => {
+  triggerMode = triggerModeSelect.value
+  intensityInput.disabled = triggerMode === 'manual'
+  noteLabel.textContent = triggerMode === 'manual'
+    ? 'Manual: tap once, swipe/spin for cycles'
+    : 'Auto rain mode active'
 })
 
 function midiToFrequency(midi) {
@@ -278,6 +316,61 @@ function uvToNote(uv, velocity, source) {
 function routeVoice(node) {
   node.connect(dryGain)
   node.connect(wetGain)
+}
+
+function startManualSustain(uv) {
+  if (!audioContext || audioContext.state !== 'running') {
+    return
+  }
+  const note = uvToNote(uv, 0.8, 'pointer')
+  const frequency = midiToFrequency(note.midi)
+  if (!manualSustain) {
+    const oscA = audioContext.createOscillator()
+    const oscB = audioContext.createOscillator()
+    const gain = audioContext.createGain()
+    const filter = audioContext.createBiquadFilter()
+    oscA.type = 'sine'
+    oscB.type = 'triangle'
+    filter.type = 'lowpass'
+    filter.frequency.setValueAtTime(1500, audioContext.currentTime)
+    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
+
+    oscA.connect(gain)
+    oscB.connect(gain)
+    gain.connect(filter)
+    routeVoice(filter)
+
+    oscA.start()
+    oscB.start()
+
+    manualSustain = { oscA, oscB, gain, filter }
+  }
+
+  const now = audioContext.currentTime
+  manualSustain.oscA.frequency.setTargetAtTime(frequency, now, 0.03)
+  manualSustain.oscB.frequency.setTargetAtTime(frequency * 0.5, now, 0.035)
+}
+
+function setManualSustainLevel(level) {
+  if (!manualSustain || !audioContext) {
+    return
+  }
+  const now = audioContext.currentTime
+  const target = Math.max(0.0001, Math.min(0.22, level))
+  manualSustain.gain.gain.cancelScheduledValues(now)
+  manualSustain.gain.gain.setTargetAtTime(target, now, 0.05)
+}
+
+function stopManualSustain(releaseSeconds = 0.25) {
+  if (!manualSustain || !audioContext) {
+    return
+  }
+  const now = audioContext.currentTime
+  manualSustain.gain.gain.cancelScheduledValues(now)
+  manualSustain.gain.gain.setTargetAtTime(0.0001, now, Math.max(0.03, releaseSeconds * 0.4))
+  manualSustain.oscA.stop(now + releaseSeconds + 0.12)
+  manualSustain.oscB.stop(now + releaseSeconds + 0.12)
+  manualSustain = null
 }
 
 function playDX7ish(frequency, velocity, now) {
@@ -476,10 +569,6 @@ function spawnRipple(uv, strength, source = 'auto') {
   tryTriggerNote(uv, Math.max(0.25, strength), source)
 }
 
-let pointerDown = false
-let lastPointerUV = null
-let lastPointerStamp = 0
-
 function getPointerUV(event) {
   const rect = renderer.domElement.getBoundingClientRect()
   const x = (event.clientX - rect.left) / rect.width
@@ -496,7 +585,17 @@ renderer.domElement.addEventListener('pointerdown', async (event) => {
   await audioContext.resume()
   audioToggle.textContent = 'Audio Active'
   const uv = getPointerUV(event)
-  spawnRipple(uv, 0.95, 'pointer')
+  if (triggerMode === 'manual') {
+    spawnRipple(uv, 1.0, 'pointer')
+    activeManualRipple = ripples[ripples.length - 1] || null
+    manualPointerUV = uv
+    manualPressStart = performance.now()
+    manualMoved = false
+    startManualSustain(uv)
+    setManualSustainLevel(0.0001)
+  } else {
+    spawnRipple(uv, 0.95, 'pointer')
+  }
   lastPointerUV = uv
   lastPointerStamp = performance.now()
 })
@@ -508,7 +607,28 @@ renderer.domElement.addEventListener('pointermove', (event) => {
   const uv = getPointerUV(event)
   const now = performance.now()
   if (!lastPointerUV) {
-    spawnRipple(uv, 0.9, 'pointer')
+    if (triggerMode === 'auto') {
+      spawnRipple(uv, 0.9, 'pointer')
+    }
+    lastPointerUV = uv
+    lastPointerStamp = now
+    return
+  }
+  if (triggerMode === 'manual') {
+    if (!activeManualRipple) {
+      lastPointerUV = uv
+      lastPointerStamp = now
+      return
+    }
+    const moveDist = Math.hypot(uv.x - lastPointerUV.x, uv.y - lastPointerUV.y)
+    manualMoved = manualMoved || moveDist > 0.0015
+    manualPointerUV = uv
+    activeManualRipple.x = uv.x
+    activeManualRipple.y = uv.y
+    activeManualRipple.start = uniforms.uTime.value
+    activeManualRipple.amp = 0.95
+    startManualSustain(uv)
+    setManualSustainLevel(0.13)
     lastPointerUV = uv
     lastPointerStamp = now
     return
@@ -522,6 +642,16 @@ renderer.domElement.addEventListener('pointermove', (event) => {
 })
 
 const endPointer = () => {
+  if (triggerMode === 'manual') {
+    const heldFor = performance.now() - manualPressStart
+    if (manualMoved || heldFor > 220) {
+      stopManualSustain(0.45)
+    } else {
+      stopManualSustain(0.12)
+    }
+    activeManualRipple = null
+    manualPointerUV = null
+  }
   pointerDown = false
   lastPointerUV = null
 }
@@ -551,6 +681,9 @@ function updateRipples(time) {
 }
 
 function spawnAutoDrops(dt) {
+  if (triggerMode !== 'auto') {
+    return
+  }
   const baseRate = isMobileLayout ? 5.2 : 7.5
   const dropsPerSecond = dropIntensity * baseRate
   dropAccumulator += dt * dropsPerSecond
@@ -571,6 +704,12 @@ function animate() {
   requestAnimationFrame(animate)
   const dt = Math.min(clock.getDelta(), 0.05)
   uniforms.uTime.value = clock.elapsedTime
+  if (triggerMode === 'manual' && pointerDown && activeManualRipple && manualPointerUV) {
+    activeManualRipple.x = manualPointerUV.x
+    activeManualRipple.y = manualPointerUV.y
+    activeManualRipple.start = uniforms.uTime.value
+    activeManualRipple.amp = 0.95
+  }
   spawnAutoDrops(dt)
   updateRipples(uniforms.uTime.value)
   renderer.render(scene, camera)
