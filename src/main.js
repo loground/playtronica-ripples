@@ -16,21 +16,14 @@ const AMBIENT_MODES = [
 const app = document.querySelector('#app')
 app.innerHTML = `
   <div id="hud">
-    <div class="row">
+    <div class="row controls-row">
       <button id="audio-toggle" type="button">Enable Audio</button>
       <button id="mute-toggle" type="button">Mute</button>
-      <label for="trigger-mode">Mode</label>
-      <select id="trigger-mode">
+      <select id="trigger-mode" aria-label="Mode">
         <option value="auto" selected>Auto</option>
         <option value="manual">Manual</option>
       </select>
-      <label for="intensity">Drop intensity</label>
-      <input id="intensity" type="range" min="0" max="100" value="35" />
-      <output id="intensity-value">35%</output>
-    </div>
-    <div class="row">
-      <label for="instrument">Instrument</label>
-      <select id="instrument">
+      <select id="instrument" aria-label="Instrument">
         <option value="dx7">DX7 FM</option>
         <option value="piano">Soft Piano</option>
         <option value="pad">Web Pad</option>
@@ -38,10 +31,22 @@ app.innerHTML = `
         <option value="organ">Organ</option>
         <option value="synth">Analog Synth</option>
       </select>
+    </div>
+    <div class="row slider-row">
+      <label for="intensity">Drop Intensity</label>
+      <input id="intensity" type="range" min="0" max="100" value="35" />
+      <output id="intensity-value">35%</output>
+    </div>
+    <div class="row loop-row">
+      <button id="record-btn" type="button">Record</button>
+      <button id="loop-btn" type="button" disabled>Loop Off</button>
+      <button id="clear-loop" type="button" disabled>Clear</button>
+      <span id="loop-status">No loop recorded</span>
+    </div>
+    <div class="row">
       <span id="note-label">Tap water to start</span>
     </div>
   </div>
-  <div id="keyboard-label">12x6 mini-keyboard mapped across the full screen</div>
 `
 
 const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -210,6 +215,10 @@ const noteLabel = document.querySelector('#note-label')
 const audioToggle = document.querySelector('#audio-toggle')
 const muteToggle = document.querySelector('#mute-toggle')
 const triggerModeSelect = document.querySelector('#trigger-mode')
+const recordBtn = document.querySelector('#record-btn')
+const loopBtn = document.querySelector('#loop-btn')
+const clearLoopBtn = document.querySelector('#clear-loop')
+const loopStatus = document.querySelector('#loop-status')
 
 intensityInput.addEventListener('input', () => {
   dropIntensity = Number(intensityInput.value) / 100
@@ -228,6 +237,16 @@ let manualMoved = false
 let manualSustain = null
 let manualPointerUV = null
 const activePointers = new Set()
+
+const looper = {
+  isRecording: false,
+  isLooping: false,
+  events: [],
+  startMs: 0,
+  duration: 0,
+  playhead: 0,
+  nextEventIndex: 0,
+}
 
 let audioContext
 let masterGain
@@ -278,6 +297,76 @@ triggerModeSelect.addEventListener('change', () => {
   noteLabel.textContent = triggerMode === 'manual'
     ? 'Manual: auto interaction with rain disabled'
     : 'Auto rain mode active'
+})
+
+function setLoopUi() {
+  recordBtn.textContent = looper.isRecording ? 'Stop Rec' : 'Record'
+  loopBtn.textContent = looper.isLooping ? 'Loop On' : 'Loop Off'
+  loopBtn.disabled = looper.events.length === 0 || looper.isRecording
+  clearLoopBtn.disabled = looper.events.length === 0
+}
+
+function startRecording() {
+  looper.isRecording = true
+  looper.isLooping = false
+  looper.events = []
+  looper.startMs = performance.now()
+  looper.duration = 0
+  looper.playhead = 0
+  looper.nextEventIndex = 0
+  loopStatus.textContent = 'Recording...'
+  setLoopUi()
+}
+
+function stopRecording() {
+  looper.isRecording = false
+  if (looper.events.length > 0) {
+    const lastTime = looper.events[looper.events.length - 1].time
+    looper.duration = Math.max(0.8, lastTime + 0.35)
+    loopStatus.textContent = `Loop ready (${looper.duration.toFixed(1)}s)`
+  } else {
+    looper.duration = 0
+    loopStatus.textContent = 'No loop recorded'
+  }
+  setLoopUi()
+}
+
+function toggleLoopPlayback() {
+  if (looper.events.length === 0) {
+    return
+  }
+  looper.isLooping = !looper.isLooping
+  looper.playhead = 0
+  looper.nextEventIndex = 0
+  loopStatus.textContent = looper.isLooping ? 'Loop playing' : 'Loop paused'
+  setLoopUi()
+}
+
+function clearLoop() {
+  looper.isRecording = false
+  looper.isLooping = false
+  looper.events = []
+  looper.duration = 0
+  looper.playhead = 0
+  looper.nextEventIndex = 0
+  loopStatus.textContent = 'No loop recorded'
+  setLoopUi()
+}
+
+recordBtn.addEventListener('click', () => {
+  if (looper.isRecording) {
+    stopRecording()
+  } else {
+    startRecording()
+  }
+})
+
+loopBtn.addEventListener('click', () => {
+  toggleLoopPlayback()
+})
+
+clearLoopBtn.addEventListener('click', () => {
+  clearLoop()
 })
 
 function midiToFrequency(midi) {
@@ -572,6 +661,13 @@ function spawnRipple(uv, strength, source = 'auto') {
   if (ripples.length > MAX_RIPPLES) {
     ripples.shift()
   }
+  if (looper.isRecording && source === 'pointer') {
+    looper.events.push({
+      time: (performance.now() - looper.startMs) / 1000,
+      uv: { x: uv.x, y: uv.y },
+      strength,
+    })
+  }
   tryTriggerNote(uv, Math.max(0.25, strength), source)
 }
 
@@ -673,11 +769,33 @@ function spawnAutoDrops(dt) {
   }
 }
 
+function updateLoopPlayback(dt) {
+  if (!looper.isLooping || looper.events.length === 0 || looper.duration <= 0) {
+    return
+  }
+
+  looper.playhead += dt
+  while (
+    looper.nextEventIndex < looper.events.length &&
+    looper.events[looper.nextEventIndex].time <= looper.playhead
+  ) {
+    const evt = looper.events[looper.nextEventIndex]
+    spawnRipple(evt.uv, evt.strength * 0.92, 'loop')
+    looper.nextEventIndex += 1
+  }
+
+  if (looper.playhead >= looper.duration) {
+    looper.playhead -= looper.duration
+    looper.nextEventIndex = 0
+  }
+}
+
 function animate() {
   requestAnimationFrame(animate)
   const dt = Math.min(clock.getDelta(), 0.05)
   uniforms.uTime.value = clock.elapsedTime
   spawnAutoDrops(dt)
+  updateLoopPlayback(dt)
   updateRipples(uniforms.uTime.value)
   renderer.render(scene, camera)
 }
@@ -690,4 +808,5 @@ function onResize() {
 
 window.addEventListener('resize', onResize)
 applyResponsiveTuning()
+setLoopUi()
 animate()
