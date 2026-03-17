@@ -46,6 +46,30 @@ canvas {
   max-width: none;
 }
 
+#show-ui-fab {
+  position: absolute;
+  right: 12px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index: 3;
+  display: none;
+  min-height: 42px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(170, 196, 224, 0.35);
+  background: rgba(12, 30, 50, 0.78);
+  color: #eef6ff;
+  font-weight: 700;
+}
+
+.hud-hidden #hud {
+  display: none;
+}
+
+.hud-hidden #show-ui-fab {
+  display: inline-flex;
+  align-items: center;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -128,5 +152,10 @@ input[type='range']:disabled {
   #loop-status,
   output {
     font-size: 13px;
+  }
+
+  #show-ui-fab {
+    bottom: 14px;
+    right: 14px;
   }
 }

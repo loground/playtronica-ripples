@@ -19,6 +19,8 @@ app.innerHTML = `
     <div class="row controls-row">
       <button id="audio-toggle" type="button">Enable Audio</button>
       <button id="mute-toggle" type="button">Mute</button>
+      <button id="hide-ui-btn" type="button">Hide UI</button>
+      <button id="grid-toggle" type="button">Hide Grid</button>
       <select id="trigger-mode" aria-label="Mode">
         <option value="auto" selected>Auto</option>
         <option value="manual">Manual</option>
@@ -47,6 +49,7 @@ app.innerHTML = `
       <span id="note-label">Tap water to start</span>
     </div>
   </div>
+  <button id="show-ui-fab" type="button" aria-label="Show menu">Menu</button>
 `
 
 const renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -70,6 +73,7 @@ const uniforms = {
   uRippleAmp: { value: 1.0 },
   uNormalStrength: { value: 28.0 },
   uRippleFreq: { value: 92.0 },
+  uShowGrid: { value: 1.0 },
   uRippleCount: { value: 0 },
   uRipples: { value: rippleUniform },
 }
@@ -99,6 +103,7 @@ const material = new THREE.ShaderMaterial({
     uniform float uRippleAmp;
     uniform float uNormalStrength;
     uniform float uRippleFreq;
+    uniform float uShowGrid;
     uniform int uRippleCount;
     uniform vec4 uRipples[MAX_RIPPLES];
 
@@ -168,7 +173,7 @@ const material = new THREE.ShaderMaterial({
 
       vec2 g = fract(uv * vec2(12.0, 6.0));
       float edge = min(min(g.x, 1.0 - g.x), min(g.y, 1.0 - g.y));
-      float gridLine = 1.0 - smoothstep(0.0, 0.016, edge);
+      float gridLine = (1.0 - smoothstep(0.0, 0.016, edge)) * uShowGrid;
       color = mix(color, color + vec3(0.1, 0.12, 0.14), gridLine * 0.65);
 
       gl_FragColor = vec4(color, 1.0);
@@ -219,6 +224,9 @@ const recordBtn = document.querySelector('#record-btn')
 const loopBtn = document.querySelector('#loop-btn')
 const clearLoopBtn = document.querySelector('#clear-loop')
 const loopStatus = document.querySelector('#loop-status')
+const hideUiBtn = document.querySelector('#hide-ui-btn')
+const showUiFab = document.querySelector('#show-ui-fab')
+const gridToggleBtn = document.querySelector('#grid-toggle')
 
 intensityInput.addEventListener('input', () => {
   dropIntensity = Number(intensityInput.value) / 100
@@ -237,6 +245,7 @@ let manualMoved = false
 let manualSustain = null
 let manualPointerUV = null
 const activePointers = new Set()
+let showGrid = true
 
 const looper = {
   isRecording: false,
@@ -367,6 +376,20 @@ loopBtn.addEventListener('click', () => {
 
 clearLoopBtn.addEventListener('click', () => {
   clearLoop()
+})
+
+hideUiBtn.addEventListener('click', () => {
+  app.classList.add('hud-hidden')
+})
+
+showUiFab.addEventListener('click', () => {
+  app.classList.remove('hud-hidden')
+})
+
+gridToggleBtn.addEventListener('click', () => {
+  showGrid = !showGrid
+  uniforms.uShowGrid.value = showGrid ? 1.0 : 0.0
+  gridToggleBtn.textContent = showGrid ? 'Hide Grid' : 'Show Grid'
 })
 
 function midiToFrequency(midi) {
